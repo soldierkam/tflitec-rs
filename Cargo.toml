@@ -20,10 +20,14 @@ bindgen = "0.65"
 fs_extra = "1.3"
 curl = "0.4"
 
+[dev-dependencies]
+pretty_assertions = "1.3.0"
+
 [features]
 xnnpack = []
 xnnpack_qu8 = ["xnnpack"]
 xnnpack_qs8 = ["xnnpack"]
+edgetpu = []
 
 # docs.rs-specific configuration
 [package.metadata.docs.rs]

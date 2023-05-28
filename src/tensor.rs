@@ -27,6 +27,8 @@ pub struct QuantizationParameters {
 pub enum DataType {
     /// A boolean.
     Bool,
+    /// An 8-bit signed integer.
+    Int8,
     /// An 8-bit unsigned integer.
     Uint8,
     /// A 16-bit signed integer.
@@ -56,6 +58,7 @@ impl DataType {
     pub(crate) fn new(tflite_type: TfLiteType) -> Option<DataType> {
         match tflite_type {
             bindings::TfLiteType_kTfLiteBool => Some(DataType::Bool),
+            bindings::TfLiteType_kTfLiteInt8 => Some(DataType::Int8),
             bindings::TfLiteType_kTfLiteUInt8 => Some(DataType::Uint8),
             bindings::TfLiteType_kTfLiteInt16 => Some(DataType::Int16),
             bindings::TfLiteType_kTfLiteInt32 => Some(DataType::Int32),

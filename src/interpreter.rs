@@ -9,6 +9,9 @@ use crate::tensor::Tensor;
 use crate::{Error, ErrorKind, Result};
 use std::fmt::{Debug, Formatter};
 
+#[cfg(test)]
+use pretty_assertions::{assert_eq, assert_ne};
+
 /// Options for configuring the [`Interpreter`].
 #[derive(Debug, Eq, PartialEq, Copy, Clone, Hash, Ord, PartialOrd)]
 pub struct Options {
@@ -40,6 +43,10 @@ pub struct Options {
     #[cfg(feature = "xnnpack")]
     #[cfg_attr(docsrs, doc(cfg(feature = "xnnpack")))]
     pub is_xnnpack_enabled: bool,
+
+    #[cfg(feature = "edgetpu")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "edgetpu")))]
+    pub is_edgetpu_enabled: bool,
 }
 
 impl Default for Options {
@@ -48,6 +55,8 @@ impl Default for Options {
             thread_count: -1,
             #[cfg(feature = "xnnpack")]
             is_xnnpack_enabled: false,
+            #[cfg(feature = "edgetpu")]
+            is_edgetpu_enabled: false,
         }
     }
 }
@@ -65,6 +74,10 @@ pub struct Interpreter<'a> {
     /// The underlying [`TfLiteDelegate`] C pointer for XNNPACK delegate.
     #[cfg(feature = "xnnpack")]
     xnnpack_delegate_ptr: Option<*mut TfLiteDelegate>,
+
+    /// The underlying [`TfLiteDelegate`] C pointer for Edge TPU delegate.
+    #[cfg(feature = "edgetpu")]
+    edgetpu_delegate_ptr: Option<*mut TfLiteDelegate>,
 
     /// The underlying `Model` to limit lifetime of the interpreter.
     /// See this issue for details:
@@ -125,6 +138,18 @@ impl<'a> Interpreter<'a> {
                 }
             }
 
+            #[cfg(feature = "edgetpu")]
+            let mut edgetpu_delegate_ptr: Option<*mut TfLiteDelegate> = None;
+            #[cfg(feature = "edgetpu")]
+            {
+                if let Some(options) = options.as_ref() {
+                    if options.is_edgetpu_enabled {
+                        edgetpu_delegate_ptr =
+                            Some(Interpreter::configure_edgetpu(options_ptr));
+                    }
+                }
+            }
+
             // TODO(ebraraktas): TfLiteInterpreterOptionsSetErrorReporter
             let model_ptr = model.model_ptr as *const TfLiteModel;
             let interpreter_ptr = TfLiteInterpreterCreate(model_ptr, options_ptr);
@@ -137,6 +162,8 @@ impl<'a> Interpreter<'a> {
                     interpreter_ptr,
                     #[cfg(feature = "xnnpack")]
                     xnnpack_delegate_ptr,
+                    #[cfg(feature = "edgetpu")]
+                    edgetpu_delegate_ptr,
                     model,
                 })
             }
@@ -361,6 +388,21 @@ impl<'a> Interpreter<'a> {
         TfLiteInterpreterOptionsAddDelegate(interpreter_options_ptr, xnnpack_delegate_ptr);
         xnnpack_delegate_ptr
     }
+
+    #[cfg(feature = "edgetpu")]
+    unsafe fn configure_edgetpu(
+        interpreter_options_ptr: *mut TfLiteInterpreterOptions,
+    ) -> *mut TfLiteDelegate {
+        use std::ptr;
+
+        let edgetpu_delegate_ptr = edgetpu_create_delegate(edgetpu_device_type_EDGETPU_APEX_USB,
+                                                           ptr::null(), ptr::null(), 0);
+        if edgetpu_delegate_ptr.is_null() {
+            panic!("Cannot create Edge TPU delegate")
+        }
+        TfLiteInterpreterOptionsAddDelegate(interpreter_options_ptr, edgetpu_delegate_ptr);
+        edgetpu_delegate_ptr
+    }
 }
 
 impl Drop for Interpreter<'_> {
@@ -372,6 +414,13 @@ impl Drop for Interpreter<'_> {
             {
                 if let Some(delegate_ptr) = self.xnnpack_delegate_ptr {
                     TfLiteXNNPackDelegateDelete(delegate_ptr)
+                }
+            }
+
+            #[cfg(feature = "edgetpu")]
+            {
+                if let Some(delegate_ptr) = self.edgetpu_delegate_ptr {
+                    edgetpu_free_delegate(delegate_ptr)
                 }
             }
         }
@@ -389,6 +438,7 @@ mod tests {
     const MODEL_PATH: &str = "tests\\add.bin";
     #[cfg(not(target_os = "windows"))]
     const MODEL_PATH: &str = "tests/add.bin";
+    const EDGETPU_MODEL_PATH: &str = "tests/add_int8_edgetpu.tflite";
 
     #[test]
     fn test_interpreter_input_output_count() {
@@ -485,6 +535,7 @@ mod tests {
         let options = Some(Options {
             thread_count: 2,
             is_xnnpack_enabled: true,
+            is_edgetpu_enabled: false,
         });
         let model = Model::new(MODEL_PATH).expect("Cannot load model from file!");
         let interpreter = Interpreter::new(&model, options).expect("Cannot create interpreter!");
@@ -503,6 +554,35 @@ mod tests {
         let output_tensor = interpreter.output(0).unwrap();
         assert_eq!(output_tensor.shape().dimensions(), &vec![10, 8, 8, 3]);
         let output_vector = output_tensor.data::<f32>().to_vec();
+        assert_eq!(expected, output_vector);
+    }
+
+    #[cfg(feature = "edgetpu")]
+    #[test]
+    fn test_interpreter_invoke_edgetpu() {
+        use crate::interpreter::Options;
+        let options = Some(Options {
+            thread_count: 2,
+            is_xnnpack_enabled: false,
+            is_edgetpu_enabled: true,
+        });
+        let model = Model::new(EDGETPU_MODEL_PATH).expect("Cannot load model from file!");
+        let interpreter = Interpreter::new(&model, options).expect("Cannot create interpreter!");
+
+        interpreter
+            .resize_input(0, tensor::Shape::new(vec![10,8,8,3]))
+            .expect("Resize failed");
+        interpreter
+            .allocate_tensors()
+            .expect("Cannot allocate tensors");
+
+        let data = (0..1920).map(|x| x as i8).collect::<Vec<i8>>();
+        assert!(interpreter.copy(&data[..], 0).is_ok());
+        assert!(interpreter.invoke().is_ok());
+        let expected: Vec<i8> = data.iter().map(|e| e.saturating_mul(3i8) ).collect();
+        let output_tensor = interpreter.output(0).unwrap();
+        assert_eq!(output_tensor.shape().dimensions(), &vec![10, 8, 8, 3]);
+        let output_vector = output_tensor.data::<i8>().to_vec();
         assert_eq!(expected, output_vector);
     }
 }

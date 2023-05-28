@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 const TAG: &str = "v2.9.1";
+const EDGETPU_TAG: &str = "release-grouper";
 const TF_GIT_URL: &str = "https://github.com/tensorflow/tensorflow.git";
+const EDGETPU_GIT_URL: &str = "https://github.com/google-coral/libedgetpu.git";
 const BAZEL_COPTS_ENV_VAR: &str = "TFLITEC_BAZEL_COPTS";
 const PREBUILT_PATH_ENV_VAR: &str = "TFLITEC_PREBUILT_PATH";
 const HEADER_DIR_ENV_VAR: &str = "TFLITEC_HEADER_DIR";
@@ -161,6 +163,30 @@ fn prepare_tensorflow_source(tf_src_path: &Path) {
     }
 }
 
+fn prepare_libedgetpu_source(edgetpu_src_path: &Path) {
+    let complete_clone_hint_file = edgetpu_src_path.join(".complete_clone");
+    if !complete_clone_hint_file.exists() {
+        if edgetpu_src_path.exists() {
+            std::fs::remove_dir_all(edgetpu_src_path).expect("Cannot clean edgetpu_src_path");
+        }
+        let mut git = std::process::Command::new("git");
+        git.arg("clone")
+            .args(["--depth", "1"])
+            .arg("--shallow-submodules")
+            .args(["--branch", EDGETPU_TAG])
+            .arg("--single-branch")
+            .arg(EDGETPU_GIT_URL)
+            .arg(edgetpu_src_path.to_str().unwrap());
+        println!("Git clone started");
+        let start = Instant::now();
+        if !git.status().expect("Cannot execute `git clone`").success() {
+            panic!("git clone failed");
+        }
+        std::fs::File::create(complete_clone_hint_file).expect("Cannot create clone hint file!");
+        println!("Clone took {:?}", Instant::now() - start);
+    }
+}
+
 fn check_and_set_envs() {
     let python_bin_path = get_python_bin_path().expect(
         "Cannot find Python binary having required packages. \
@@ -209,13 +235,13 @@ fn check_and_set_envs() {
     }
 }
 
-fn lib_output_path() -> PathBuf {
+fn lib_output_path(name: &str, ios_name: &str) -> PathBuf {
     if target_os() != "ios" {
         let ext = dll_extension();
         let lib_prefix = dll_prefix();
-        out_dir().join(format!("{}tensorflowlite_c.{}", lib_prefix, ext))
+        out_dir().join(format!("{}{}.{}", lib_prefix, name, ext))
     } else {
-        out_dir().join("TensorFlowLiteC.framework")
+        out_dir().join(format!("{}.framework", ios_name))
     }
 }
 
@@ -332,6 +358,34 @@ fn build_tensorflow_with_bazel(tf_src_path: &str, config: &str, lib_output_path:
     }
 }
 
+fn build_libedgetpu_with_bazel(edgetpu_src_path: &str, lib_output_path: &Path) {
+    let make_output_path_buf= PathBuf::from(edgetpu_src_path)
+        .join("out")
+        .join("direct")
+        .join("k8")
+        .join("libedgetpu.so.1.0");
+
+    let mut make = std::process::Command::new("make");
+    make.arg("docker-build");
+    make.env("DOCKER_CPUS", "k8");
+    make.env( "DOCKER_IMAGE", "ubuntu:18.04");
+    make.env( "DOCKER_TARGETS", "libedgetpu");
+    make.current_dir(edgetpu_src_path);
+
+
+    println!("Build Command: {:?}", make);
+    if !make.status().expect("Cannot execute make").success() {
+        panic!("Cannot build libedgetpu");
+    }
+    if !make_output_path_buf.exists() {
+        panic!(
+            "Library/Framework not found in {}",
+            make_output_path_buf.display()
+        )
+    }
+    copy_or_overwrite(&make_output_path_buf, lib_output_path);
+}
+
 fn out_dir() -> PathBuf {
     PathBuf::from(env::var("OUT_DIR").unwrap())
 }
@@ -358,7 +412,7 @@ fn prepare_for_docsrs() {
     }
 }
 
-fn generate_bindings(tf_src_path: PathBuf) {
+fn generate_bindings(tf_src_path: PathBuf, edgetpu_src_path: PathBuf) {
     let mut builder = bindgen::Builder::default().header(
         tf_src_path
             .join("tensorflow/lite/c/c_api.h")
@@ -369,6 +423,15 @@ fn generate_bindings(tf_src_path: PathBuf) {
         builder = builder.header(
             tf_src_path
                 .join("tensorflow/lite/delegates/xnnpack/xnnpack_delegate.h")
+                .to_str()
+                .unwrap(),
+        );
+    }
+    if cfg!(feature = "edgetpu") {
+        // https://github.com/google-coral/libedgetpu.git
+        builder = builder.header(
+            edgetpu_src_path
+                .join("tflite/public/edgetpu_c.h")
                 .to_str()
                 .unwrap(),
         );
@@ -513,23 +576,28 @@ fn main() {
     if os != "ios" {
         println!("cargo:rustc-link-search=native={}", out_path.display());
         println!("cargo:rustc-link-lib=dylib=tensorflowlite_c");
+        println!("cargo:rustc-link-lib=dylib=edgetpu_c");
     } else {
         println!("cargo:rustc-link-search=framework={}", out_path.display());
         println!("cargo:rustc-link-lib=framework=TensorFlowLiteC");
+        println!("cargo:rustc-link-lib=framework=EdgeTpuC");
     }
     if env::var("DOCS_RS") == Ok(String::from("1")) {
         // docs.rs cannot access to network, use resource files
         prepare_for_docsrs();
     } else {
         let tf_src_path = out_path.join(format!("tensorflow_{}", TAG));
-        let lib_output_path = lib_output_path();
+        let edgetpu_src_path = out_path.join(format!("libedgetpu_{}", EDGETPU_TAG));
+        let tensorflow_lib_output_path = lib_output_path("tensorflowlite_c", "TensorFlowLiteC");
+        let edgetpu_lib_output_path = lib_output_path("edgetpu_c", "EdgeTpuC");
 
         if let Some(prebuilt_tflitec_path) = get_target_dependent_env_var(PREBUILT_PATH_ENV_VAR) {
-            install_prebuilt(&prebuilt_tflitec_path, &tf_src_path, &lib_output_path);
+            install_prebuilt(&prebuilt_tflitec_path, &tf_src_path, &tensorflow_lib_output_path);
         } else {
             // Build from source
             check_and_set_envs();
             prepare_tensorflow_source(tf_src_path.as_path());
+            prepare_libedgetpu_source(edgetpu_src_path.as_path());
             let config = if os == "android" || os == "ios" || (os == "macos" && arch == "arm64") {
                 format!("{}_{}", os, arch)
             } else {
@@ -538,11 +606,15 @@ fn main() {
             build_tensorflow_with_bazel(
                 tf_src_path.to_str().unwrap(),
                 &config,
-                lib_output_path.as_path(),
+                tensorflow_lib_output_path.as_path(),
+            );
+            build_libedgetpu_with_bazel(
+                edgetpu_src_path.to_str().unwrap(),
+                edgetpu_lib_output_path.as_path(),
             );
         }
 
         // Generate bindings using headers
-        generate_bindings(tf_src_path);
+        generate_bindings(tf_src_path, edgetpu_src_path);
     }
 }
