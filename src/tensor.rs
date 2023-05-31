@@ -188,7 +188,7 @@ impl<'a> Tensor<'a> {
             };
             let quantization_parameters_ptr = TfLiteTensorQuantizationParams(tensor_ptr);
             let scale = quantization_parameters_ptr.scale;
-            let quantization_parameters = if scale == 0.0 || data_type != DataType::Uint8 {
+            let quantization_parameters = if scale == 0.0 || (data_type != DataType::Uint8 && data_type != DataType::Int8) {
                 None
             } else {
                 Some(QuantizationParameters {

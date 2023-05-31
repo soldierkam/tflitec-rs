@@ -8,9 +8,7 @@ use crate::tensor;
 use crate::tensor::Tensor;
 use crate::{Error, ErrorKind, Result};
 use std::fmt::{Debug, Formatter};
-
-#[cfg(test)]
-use pretty_assertions::{assert_eq, assert_ne};
+use std::ptr;
 
 /// Options for configuring the [`Interpreter`].
 #[derive(Debug, Eq, PartialEq, Copy, Clone, Hash, Ord, PartialOrd)]
@@ -393,7 +391,7 @@ impl<'a> Interpreter<'a> {
     unsafe fn configure_edgetpu(
         interpreter_options_ptr: *mut TfLiteInterpreterOptions,
     ) -> *mut TfLiteDelegate {
-        use std::ptr;
+        
 
         let edgetpu_delegate_ptr = edgetpu_create_delegate(edgetpu_device_type_EDGETPU_APEX_USB,
                                                            ptr::null(), ptr::null(), 0);
@@ -409,7 +407,7 @@ impl Drop for Interpreter<'_> {
     fn drop(&mut self) {
         unsafe {
             TfLiteInterpreterDelete(self.interpreter_ptr);
-
+            
             #[cfg(feature = "xnnpack")]
             {
                 if let Some(delegate_ptr) = self.xnnpack_delegate_ptr {
@@ -438,7 +436,7 @@ mod tests {
     const MODEL_PATH: &str = "tests\\add.bin";
     #[cfg(not(target_os = "windows"))]
     const MODEL_PATH: &str = "tests/add.bin";
-    const EDGETPU_MODEL_PATH: &str = "tests/add_int8_edgetpu.tflite";
+    const EDGETPU_MODEL_PATH: &str = "tests/add_uint8_edgetpu.tflite";
 
     #[test]
     fn test_interpreter_input_output_count() {
@@ -560,7 +558,10 @@ mod tests {
     #[cfg(feature = "edgetpu")]
     #[test]
     fn test_interpreter_invoke_edgetpu() {
-        use crate::interpreter::Options;
+        use std::ffi::CStr;
+
+        use crate::{interpreter::Options, tensor::QuantizationParameters, bindings::TfLiteVersion};
+        use pretty_assertions::{assert_eq};
         let options = Some(Options {
             thread_count: 2,
             is_xnnpack_enabled: false,
@@ -570,19 +571,32 @@ mod tests {
         let interpreter = Interpreter::new(&model, options).expect("Cannot create interpreter!");
 
         interpreter
-            .resize_input(0, tensor::Shape::new(vec![10,8,8,3]))
+            .resize_input(0, tensor::Shape::new(vec![1,8,8,3]))
             .expect("Resize failed");
         interpreter
             .allocate_tensors()
             .expect("Cannot allocate tensors");
 
-        let data = (0..1920).map(|x| x as i8).collect::<Vec<i8>>();
-        assert!(interpreter.copy(&data[..], 0).is_ok());
+        let data = (0..192).map(|x| x as f32).collect::<Vec<f32>>();
+        let input_tensor = interpreter.input(0).unwrap();
+        let in_q = input_tensor.quantization_parameters().unwrap_or(QuantizationParameters{
+            scale: 1.0,
+            zero_point: 0
+        });
+        let data_q: Vec<i8> = data.iter().map(|x| (*x/in_q.scale + in_q.zero_point as f32)as i8 ).collect();
+        assert!(interpreter.copy(&data_q[..], 0).is_ok());
         assert!(interpreter.invoke().is_ok());
-        let expected: Vec<i8> = data.iter().map(|e| e.saturating_mul(3i8) ).collect();
+        let expected: Vec<f32> = data.iter().map(|e| (*e as f32) * 3.0 ).collect();
         let output_tensor = interpreter.output(0).unwrap();
-        assert_eq!(output_tensor.shape().dimensions(), &vec![10, 8, 8, 3]);
-        let output_vector = output_tensor.data::<i8>().to_vec();
-        assert_eq!(expected, output_vector);
+        let out_q = output_tensor.quantization_parameters().unwrap_or(QuantizationParameters{
+            scale: 1.0,
+            zero_point: 0
+        });
+
+        assert_eq!(output_tensor.shape().dimensions(), &vec![1, 8, 8, 3]);
+        let output_vector: Vec<f32> = output_tensor.data::<i8>().iter().map(|x| (((*x as i32) - out_q.zero_point) as f32) * out_q.scale ).collect();
+        let tf_version = unsafe{CStr::from_ptr(TfLiteVersion()).to_str()}.unwrap();
+        eprint!("{}", tf_version);
+        assert_eq!( expected[1], output_vector[1]);
     }
 }
