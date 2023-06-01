@@ -6,7 +6,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-const TAG: &str = "v2.9.1";
+const TAG: &str = "v2.11.0";
 const EDGETPU_TAG: &str = "release-grouper";
 const TF_GIT_URL: &str = "https://github.com/tensorflow/tensorflow.git";
 const EDGETPU_GIT_URL: &str = "https://github.com/google-coral/libedgetpu.git";
