@@ -6,7 +6,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-const TAG: &str = "v2.11.0";
+const TAG: &str = "2.11";
 const EDGETPU_TAG: &str = "release-grouper";
 const TF_GIT_URL: &str = "https://github.com/tensorflow/tensorflow.git";
 const EDGETPU_GIT_URL: &str = "https://github.com/google-coral/libedgetpu.git";
@@ -130,39 +130,6 @@ fn get_python_bin_path() -> Option<PathBuf> {
     }
 }
 
-fn prepare_tensorflow_source(tf_src_path: &Path) {
-    let complete_clone_hint_file = tf_src_path.join(".complete_clone");
-    if !complete_clone_hint_file.exists() {
-        if tf_src_path.exists() {
-            std::fs::remove_dir_all(tf_src_path).expect("Cannot clean tf_src_path");
-        }
-        let mut git = std::process::Command::new("git");
-        git.arg("clone")
-            .args(["--depth", "1"])
-            .arg("--shallow-submodules")
-            .args(["--branch", TAG])
-            .arg("--single-branch")
-            .arg(TF_GIT_URL)
-            .arg(tf_src_path.to_str().unwrap());
-        println!("Git clone started");
-        let start = Instant::now();
-        if !git.status().expect("Cannot execute `git clone`").success() {
-            panic!("git clone failed");
-        }
-        std::fs::File::create(complete_clone_hint_file).expect("Cannot create clone hint file!");
-        println!("Clone took {:?}", Instant::now() - start);
-    }
-
-    #[cfg(feature = "xnnpack")]
-    {
-        let root = std::path::PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-        let bazel_build_path = root.join("build-res/tflitec_with_xnnpack_BUILD.bazel");
-        let target = tf_src_path.join("tensorflow/lite/c/tmp/BUILD");
-        std::fs::create_dir_all(target.parent().unwrap()).expect("Cannot create tmp directory");
-        std::fs::copy(bazel_build_path, target).expect("Cannot copy temporary BUILD file");
-    }
-}
-
 fn prepare_libedgetpu_source(edgetpu_src_path: &Path) {
     let complete_clone_hint_file = edgetpu_src_path.join(".complete_clone");
     if !complete_clone_hint_file.exists() {
@@ -245,88 +212,55 @@ fn lib_output_path(name: &str, ios_name: &str) -> PathBuf {
     }
 }
 
-fn build_tensorflow_with_bazel(tf_src_path: &str, config: &str, lib_output_path: &Path) {
+fn build_tensorflow_with_docker(tf_src_path: &Path, config: &str, lib_output_path: &Path) {
     let target_os = target_os();
-    let bazel_output_path_buf;
-    let bazel_target;
-    if target_os != "ios" {
-        let ext = dll_extension();
-        let sub_directory = if cfg!(feature = "xnnpack") {
-            "/tmp"
-        } else {
-            ""
-        };
-        let mut lib_out_dir = PathBuf::from(tf_src_path)
-            .join("bazel-bin")
-            .join("tensorflow")
-            .join("lite")
-            .join("c");
-        if !sub_directory.is_empty() {
-            lib_out_dir = lib_out_dir.join(&sub_directory[1..]);
-        }
-        let lib_prefix = dll_prefix();
-        bazel_output_path_buf = lib_out_dir.join(format!("{}tensorflowlite_c.{}", lib_prefix, ext));
-        bazel_target = format!("//tensorflow/lite/c{}:tensorflowlite_c", sub_directory);
-    } else {
-        bazel_output_path_buf = PathBuf::from(tf_src_path)
-            .join("bazel-bin")
-            .join("tensorflow")
-            .join("lite")
-            .join("ios")
-            .join("TensorFlowLiteC_framework.zip");
-        bazel_target = String::from("//tensorflow/lite/ios:TensorFlowLiteC_framework");
-    };
+    let ext = dll_extension();
+    let lib_prefix = dll_prefix();
 
-    let python_bin_path = env::var("PYTHON_BIN_PATH").expect("Cannot read PYTHON_BIN_PATH");
-    if !std::process::Command::new(&python_bin_path)
-        .arg("configure.py")
-        .current_dir(tf_src_path)
-        .status()
-        .unwrap_or_else(|_| panic!("Cannot execute python at {}", &python_bin_path))
-        .success()
-    {
-        panic!("Cannot configure tensorflow")
-    }
-    let mut bazel = std::process::Command::new("bazel");
-    {
-        // Set bazel outputBase under OUT_DIR
-        let bazel_output_base_path = out_dir().join(format!("tensorflow_{}_output_base", TAG));
-        bazel.arg(format!(
-            "--output_base={}",
-            bazel_output_base_path.to_str().unwrap()
-        ));
-    }
-    bazel.arg("build").arg("-c").arg("opt");
+    let bazel_output_path_buf = PathBuf::from(tf_src_path).join(format!("{}tensorflowlite_c.{}", lib_prefix, ext));
+    let bazel_target = "//tensorflow/lite/c:tensorflowlite_c";
+
+    let mut bazel_cmd = format!("git clone {} --branch v{}.0 --single-branch . && bazel build", TF_GIT_URL, TAG);
+    
 
     // Configure XNNPACK flags
     // In r2.6, it is enabled for some OS such as Windows by default.
     // To enable it by feature flag, we disable it by default on all platforms.
     #[cfg(not(feature = "xnnpack"))]
-    bazel.arg("--define").arg("tflite_with_xnnpack=false");
+    bazel_cmd.push_str(" --define tflite_with_xnnpack=false");
     #[cfg(any(feature = "xnnpack_qu8", feature = "xnnpack_qs8"))]
-    bazel.arg("--define").arg("tflite_with_xnnpack=true");
+    bazel_cmd.push_str(" --define tflite_with_xnnpack=true");
     #[cfg(feature = "xnnpack_qs8")]
-    bazel.arg("--define").arg("xnn_enable_qs8=true");
+    bazel_cmd.push_str(" --define xnn_enable_qs8=true");
     #[cfg(feature = "xnnpack_qu8")]
-    bazel.arg("--define").arg("xnn_enable_qu8=true");
-
-    bazel
-        .arg(format!("--config={}", config))
-        .arg(bazel_target)
-        .current_dir(tf_src_path);
+    bazel_cmd.push_str(" --define xnn_enable_qu8=true");
 
     if let Some(copts) = get_target_dependent_env_var(BAZEL_COPTS_ENV_VAR) {
         let copts = copts.split_ascii_whitespace();
         for opt in copts {
-            bazel.arg(format!("--copt={}", opt));
+            bazel_cmd.push_str(format!(" --copt={}", opt).as_str());
         }
     }
 
     if target_os == "ios" {
-        bazel.args(["--apple_bitcode=embedded", "--copt=-fembed-bitcode"]);
+        bazel_cmd.push_str(" --apple_bitcode=embedded --copt=-fembed-bitcode");
     }
-    println!("Bazel Build Command: {:?}", bazel);
-    if !bazel.status().expect("Cannot execute bazel").success() {
+    bazel_cmd.push_str(" --config=linux ");
+    bazel_cmd.push_str(bazel_target);
+    bazel_cmd.push_str(" && cp bazel-bin/tensorflow/lite/c/libtensorflowlite_c.so /mnt && cp -r tensorflow /mnt");
+    let mut make = std::process::Command::new("docker");
+    make.args(["run",
+        "-w", "/tensorflow_src", 
+        "-v", format!("{}:/mnt", tf_src_path.to_str().unwrap()).as_ref(), 
+        "--rm",
+        //"-e", "HOST_PERMS=$(id -u):$(id -g)", 
+        format!("tensorflow/build:{}-python3.9", TAG).as_ref(), 
+        "bash", "-c", bazel_cmd.as_str()
+    ]);
+    //make.current_dir(tf_src_path);
+
+    println!("Bazel Build Command: {:?}", make);
+    if !make.status().expect("Cannot execute bazel").success() {
         panic!("Cannot build TensorFlowLiteC");
     }
     if !bazel_output_path_buf.exists() {
@@ -358,7 +292,7 @@ fn build_tensorflow_with_bazel(tf_src_path: &str, config: &str, lib_output_path:
     }
 }
 
-fn build_libedgetpu_with_bazel(edgetpu_src_path: &str, lib_output_path: &Path) {
+fn build_libedgetpu_with_docker(edgetpu_src_path: &str, lib_output_path: &Path) {
     let make_output_path_buf= PathBuf::from(edgetpu_src_path)
         .join("out")
         .join("direct")
@@ -597,19 +531,18 @@ fn main() {
         } else {
             // Build from source
             check_and_set_envs();
-            prepare_tensorflow_source(tf_src_path.as_path());
             prepare_libedgetpu_source(edgetpu_src_path.as_path());
             let config = if os == "android" || os == "ios" || (os == "macos" && arch == "arm64") {
                 format!("{}_{}", os, arch)
             } else {
                 os
             };
-            build_tensorflow_with_bazel(
-                tf_src_path.to_str().unwrap(),
+            build_tensorflow_with_docker(
+                tf_src_path.as_path(),
                 &config,
                 tensorflow_lib_output_path.as_path(),
             );
-            build_libedgetpu_with_bazel(
+            build_libedgetpu_with_docker(
                 edgetpu_src_path.to_str().unwrap(),
                 edgetpu_lib_output_path.as_path(),
             );
