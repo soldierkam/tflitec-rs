@@ -1,0 +1,3 @@
+[submodule "libedgetpu"]
+	path = libedgetpu
+	url = https://github.com/google-coral/libedgetpu.git
