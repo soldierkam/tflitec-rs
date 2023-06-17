@@ -8,7 +8,6 @@ use crate::tensor;
 use crate::tensor::Tensor;
 use crate::{Error, ErrorKind, Result};
 use std::fmt::{Debug, Formatter};
-use std::ptr;
 
 /// Options for configuring the [`Interpreter`].
 #[derive(Debug, Eq, PartialEq, Copy, Clone, Hash, Ord, PartialOrd)]
