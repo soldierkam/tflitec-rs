@@ -8,11 +8,18 @@
 //! # Ok::<(), tflitec::Error>(())
 //! ```
 use crate::bindings::{
-    TfLiteModel, TfLiteModelCreate, TfLiteModelCreateFromFile, TfLiteModelDelete, size_t
+    TfLiteModel, TfLiteModelCreate, TfLiteModelCreateFromFile, TfLiteModelDelete
 };
 use crate::{Error, ErrorKind, Result};
 use std::ffi::{c_void, CString};
 use std::fmt::{Debug, Formatter};
+
+#[cfg(not(target_arch = "aarch64"))]
+pub type size_t = usize;
+#[cfg(target_arch = "aarch64")]
+use crate::bindings::{
+    size_t
+};
 
 /// A TensorFlow Lite model used by the [`Interpreter`][crate::interpreter::Interpreter] to perform inference.
 pub struct Model<'a> {

@@ -7,6 +7,9 @@ use crate::{Error, ErrorKind, Result};
 use std::fmt::{Debug, Formatter};
 use std::marker::PhantomData;
 
+#[cfg(not(target_arch = "aarch64"))]
+pub type size_t = usize;
+
 /// Parameters that determine the mapping of quantized values to real values.
 ///
 /// Quantized values can be mapped to float values using the following conversion:

@@ -9,6 +9,9 @@ use crate::tensor::Tensor;
 use crate::{Error, ErrorKind, Result};
 use std::fmt::{Debug, Formatter};
 
+#[cfg(not(target_arch = "aarch64"))]
+pub type size_t = usize;
+
 /// Options for configuring the [`Interpreter`].
 #[derive(Debug, Eq, PartialEq, Copy, Clone, Hash, Ord, PartialOrd)]
 pub struct Options {
