@@ -1,33 +1,79 @@
 extern crate bindgen;
 
 use std::env;
-use std::fs;
 use std::fmt::Debug;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use users::{get_effective_uid, get_effective_gid};
+use std::str::FromStr;
+use strum_macros::{EnumString, IntoStaticStr};
+use users::{get_effective_gid, get_effective_uid};
 
 const TAG: &str = "2.11";
-const TF_GIT_URL: &str = "https://github.com/tensorflow/tensorflow.git";
 const BAZEL_COPTS_ENV_VAR: &str = "TFLITEC_BAZEL_COPTS";
 const PREBUILT_PATH_ENV_VAR: &str = "TFLITEC_PREBUILT_PATH";
 const HEADER_DIR_ENV_VAR: &str = "TFLITEC_HEADER_DIR";
 
-fn target_os() -> String {
-    env::var("CARGO_CFG_TARGET_OS").expect("Unable to get TARGET_OS")
+#[derive(Debug, PartialEq, EnumString, IntoStaticStr)]
+enum TargetOs {
+    #[strum(serialize = "windows")]
+    Windows,
+    #[strum(serialize = "macos")]
+    MacOS,
+    #[strum(serialize = "ios")]
+    iOS,
+    #[strum(serialize = "linux")]
+    Linux,
+    #[strum(serialize = "android")]
+    Android,
+    #[strum(serialize = "freebsd")]
+    FreeBSD,
+    #[strum(serialize = "dragonfly")]
+    Dragonfly,
+    #[strum(serialize = "openbsd")]
+    OpenBSD,
+    #[strum(serialize = "netbsd")]
+    NetBSD,
+}
+
+fn target_os() -> TargetOs {
+    let v = env::var("CARGO_CFG_TARGET_OS").expect("Unable to get TARGET_OS");
+    TargetOs::from_str(&v).expect(format!("Unsupported target OS: {}", v).as_ref())
+}
+
+#[derive(Debug, PartialEq, EnumString, IntoStaticStr)]
+enum TargetArch {
+    #[strum(serialize = "x86")]
+    x86,
+    #[strum(serialize = "x86_64")]
+    x86_64,
+    #[strum(serialize = "mips")]
+    mips,
+    #[strum(serialize = "powerpc")]
+    powerpc,
+    #[strum(serialize = "powerpc64")]
+    powerpc64,
+    #[strum(serialize = "arm")]
+    arm,
+    #[strum(serialize = "aarch64")]
+    aarch64,
+}
+
+fn target_arch() -> TargetArch {
+    let v = env::var("CARGO_CFG_TARGET_ARCH").expect("Unable to get TARGET_ARCH");
+    TargetArch::from_str(&v).expect(format!("Unsupported target ARCH: {}", v).as_ref())
 }
 
 fn dll_extension() -> &'static str {
-    match target_os().as_str() {
-        "macos" => "dylib",
-        "windows" => "dll",
+    match target_os() {
+        TargetOs::MacOS => "dylib",
+        TargetOs::Windows => "dll",
         _ => "so",
     }
 }
 
 fn dll_prefix() -> &'static str {
-    match target_os().as_str() {
-        "windows" => "",
+    match target_os() {
+        TargetOs::Windows => "",
         _ => "lib",
     }
 }
@@ -103,7 +149,7 @@ fn get_python_bin_path() -> Option<PathBuf> {
         }
         Some(PathBuf::from(val))
     } else {
-        let bin = if target_os() == "windows" {
+        let bin = if target_os() == TargetOs::Windows {
             "where"
         } else {
             "which"
@@ -130,14 +176,13 @@ fn get_python_bin_path() -> Option<PathBuf> {
     }
 }
 
-
 fn check_and_set_envs() {
     let python_bin_path = get_python_bin_path().expect(
         "Cannot find Python binary having required packages. \
         Make sure that `which python3` or `which python` points to a Python3 binary having numpy \
         installed. Or set PYTHON_BIN_PATH to the path of that binary.",
     );
-    let os = env::var("CARGO_CFG_TARGET_OS").expect("Unable to get TARGET_OS");
+    let os = target_os();
     let default_envs = [
         ["PYTHON_BIN_PATH", python_bin_path.to_str().unwrap()],
         ["USE_DEFAULT_PYTHON_LIB_PATH", "1"],
@@ -152,9 +197,12 @@ fn check_and_set_envs() {
         ["CC_OPT_FLAGS", "-Wno-sign-compare"],
         [
             "TF_SET_ANDROID_WORKSPACE",
-            if os == "android" { "1" } else { "0" },
+            if os == TargetOs::Android { "1" } else { "0" },
         ],
-        ["TF_CONFIGURE_IOS", if os == "ios" { "1" } else { "0" }],
+        [
+            "TF_CONFIGURE_IOS",
+            if os == TargetOs::iOS { "1" } else { "0" },
+        ],
     ];
     for kv in default_envs {
         let name = kv[0];
@@ -180,7 +228,7 @@ fn check_and_set_envs() {
 }
 
 fn lib_output_path(name: &str, ios_name: &str) -> PathBuf {
-    if target_os() != "ios" {
+    if target_os() != TargetOs::iOS {
         let ext = dll_extension();
         let lib_prefix = dll_prefix();
         out_dir().join(format!("{}{}.{}", lib_prefix, name, ext))
@@ -189,16 +237,20 @@ fn lib_output_path(name: &str, ios_name: &str) -> PathBuf {
     }
 }
 
-fn build_tensorflow_with_docker(tf_src_path: &Path, config: &str, lib_output_path: &Path) {
+fn build_tensorflow_with_docker(
+    tf_src_path: &Path,
+    lib_output_path: &Path,
+    arch: &TargetArch,
+    os: &TargetOs,
+) {
     let target_os = target_os();
     let ext = dll_extension();
     let lib_prefix = dll_prefix();
 
     let bazel_target = "//tensorflow/lite/c:tensorflowlite_c";
-    println!("TF config: {}", config);
-    fs::create_dir_all(tf_src_path).expect(format!("Cannot create src path: {:?}", tf_src_path).as_ref());
-    let mut bazel_cmd = format!("git clone {} --branch v{}.0 --single-branch . && bazel build", TF_GIT_URL, TAG);
-    
+    println!("Target OS: {}", Into::<&str>::into(os));
+    println!("Target Arch: {}", Into::<&str>::into(arch));
+    let mut bazel_cmd = "bazel build".to_owned();
 
     // Configure XNNPACK flags
     // In r2.6, it is enabled for some OS such as Windows by default.
@@ -219,36 +271,43 @@ fn build_tensorflow_with_docker(tf_src_path: &Path, config: &str, lib_output_pat
         }
     }
 
-    if target_os == "ios" {
+    if target_os == TargetOs::iOS {
         bazel_cmd.push_str(" --apple_bitcode=embedded --copt=-fembed-bitcode");
     }
     bazel_cmd.push_str(" --config=linux ");
     bazel_cmd.push_str(bazel_target);
-    bazel_cmd.push_str(" && cp bazel-bin/tensorflow/lite/c/libtensorflowlite_c.so /mnt && cp -r tensorflow /mnt");
+    bazel_cmd.push_str(" && cp bazel-bin/tensorflow/lite/c/libtensorflowlite_c.so /tensorflow");
     let mut docker = std::process::Command::new("docker");
-    docker.args(["run",
-        "-w", "/tensorflow_src", 
-        "-v", format!("{}:/mnt", tf_src_path.to_str().unwrap()).as_ref(), 
+    docker.args([
+        "run",
+        "-w",
+        "/tensorflow",
+        "-v",
+        format!("{}:/tensorflow", tf_src_path.to_str().unwrap()).as_ref(),
         "--rm",
-        "-e", format!("HOST_PERMS={}:{}", get_effective_uid(), get_effective_gid()).as_ref(), 
-        format!("tensorflow/build:{}-python3.9", TAG).as_ref(), 
-        "bash", "-c", bazel_cmd.as_str()
+        "-e",
+        format!("HOST_PERMS={}:{}", get_effective_uid(), get_effective_gid()).as_ref(),
+        "tensorflow/tensorflow:devel",
+        "bash",
+        "-c",
+        bazel_cmd.as_str(),
     ]);
-    
+
     println!("Bazel Build Command: {:?}", docker);
     if !docker.status().expect("Cannot execute bazel").success() {
         panic!("Cannot build TensorFlowLiteC");
     }
-    let bazel_output_path_buf = PathBuf::from(tf_src_path).join(format!("{}tensorflowlite_c.{}", lib_prefix, ext));
+    let bazel_output_path_buf =
+        PathBuf::from(tf_src_path).join(format!("{}tensorflowlite_c.{}", lib_prefix, ext));
     if !bazel_output_path_buf.exists() {
         panic!(
             "Library/Framework not found in {}",
             bazel_output_path_buf.display()
         )
     }
-    if target_os != "ios" {
+    if target_os != TargetOs::iOS {
         copy_or_overwrite(&bazel_output_path_buf, lib_output_path);
-        if target_os == "windows" {
+        if target_os == TargetOs::Windows {
             let mut bazel_output_winlib_path_buf = bazel_output_path_buf;
             bazel_output_winlib_path_buf.set_extension("dll.if.lib");
             let winlib_output_path_buf = out_dir().join("tensorflowlite_c.lib");
@@ -269,24 +328,56 @@ fn build_tensorflow_with_docker(tf_src_path: &Path, config: &str, lib_output_pat
     }
 }
 
-fn build_libedgetpu_with_docker(edgetpu_src_path: &str, lib_output_path: &Path) {
+#[derive(Debug, PartialEq, EnumString)]
+enum TensorflowCPU {
+    #[strum(serialize = "k8")]
+    LINUX_K8,
+    #[strum(serialize = "armv7a")]
+    LINUX_ARM7,
+    #[strum(serialize = "aarch64")]
+    LINUX_AARCH64,
+    #[strum(serialize = "darwin_arm64")]
+    DARWIN_ARM64,
+    #[strum(serialize = "darwin_x86_64")]
+    DARWIN_64,
+    #[strum(serialize = "x64_windows")]
+    WINDOWS_64,
+}
+
+fn tf_cpu(arch: TargetArch, os: TargetOs) -> TensorflowCPU {
+    match os {
+        TargetOs::Linux => match arch {
+            TargetArch::x86_64 => TensorflowCPU::LINUX_K8,
+            TargetArch::arm => TensorflowCPU::LINUX_ARM7,
+            TargetArch::aarch64 => TensorflowCPU::LINUX_AARCH64,
+            _ => panic!(format!("Unsupported arch {:?} for os {:?}", arch, os)),
+        },
+        _ => panic!(format!("Unsupported arch {:?} for os {:?}", arch, os)),
+    }
+}
+
+fn build_libedgetpu_with_docker(
+    edgetpu_src_path: &str,
+    lib_output_path: &Path,
+    arch: &TargetArch,
+    os: &TargetOs,
+) {
     //$ DOCKER_CPUS="k8" DOCKER_IMAGE="ubuntu:18.04" DOCKER_TARGETS=libedgetpu make docker-build
     //$ DOCKER_CPUS="armv7a aarch64" DOCKER_IMAGE="debian:stretch" DOCKER_TARGETS=libedgetpu make docker-build
 
     let mut make = std::process::Command::new("make");
     make.arg("docker-build");
     make.env("DOCKER_CPUS", "k8");
-    make.env( "DOCKER_IMAGE", "ubuntu:18.04");
-    make.env( "DOCKER_TARGETS", "libedgetpu");
-    
-    make.current_dir(edgetpu_src_path);
+    make.env("DOCKER_IMAGE", "ubuntu:18.04");
+    make.env("DOCKER_TARGETS", "libedgetpu");
 
+    make.current_dir(edgetpu_src_path);
 
     println!("Build Command: {:?}", make);
     if !make.status().expect("Cannot execute make").success() {
         panic!("Cannot build libedgetpu");
     }
-    let make_output_path_buf= PathBuf::from(edgetpu_src_path)
+    let make_output_path_buf = PathBuf::from(edgetpu_src_path)
         .join("out")
         .join("direct")
         .join("k8")
@@ -375,7 +466,7 @@ fn install_prebuilt(prebuilt_tflitec_path: &str, tf_src_path: &Path, lib_output_
         // Copy .{so,dylib,dll,Framework} file
         copy_or_overwrite(&prebuilt_tflitec_path, lib_output_path);
 
-        if target_os() == "windows" {
+        if target_os() == TargetOs::Windows {
             // Copy .lib file
             let mut prebuilt_lib_path = prebuilt_tflitec_path;
             prebuilt_lib_path.set_extension("lib");
@@ -477,19 +568,8 @@ fn main() {
     let out_path = out_dir();
     let src_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let os = target_os();
-    let arch = env::var("CARGO_CFG_TARGET_ARCH").expect("Unable to get TARGET_ARCH");
-    let arch = match arch.as_str() {
-        "aarch64" => String::from("arm64"),
-        "armv7" => {
-            if os == "android" {
-                String::from("arm")
-            } else {
-                arch
-            }
-        }
-        _ => arch,
-    };
-    if os != "ios" {
+    let arch = target_arch();
+    if os != TargetOs::iOS {
         println!("cargo:rustc-link-search=native={}", out_path.display());
         println!("cargo:rustc-link-lib=dylib=tensorflowlite_c");
         println!("cargo:rustc-link-lib=dylib=edgetpu_c");
@@ -502,29 +582,31 @@ fn main() {
         // docs.rs cannot access to network, use resource files
         prepare_for_docsrs();
     } else {
-        let tf_src_path = out_path.join(format!("tensorflow_{}", TAG));
+        let tf_src_path = src_dir.join("tensorflow");
         let edgetpu_src_path = src_dir.join("libedgetpu");
         let tensorflow_lib_output_path = lib_output_path("tensorflowlite_c", "TensorFlowLiteC");
         let edgetpu_lib_output_path = lib_output_path("edgetpu_c", "EdgeTpuC");
 
         if let Some(prebuilt_tflitec_path) = get_target_dependent_env_var(PREBUILT_PATH_ENV_VAR) {
-            install_prebuilt(&prebuilt_tflitec_path, &tf_src_path, &tensorflow_lib_output_path);
+            install_prebuilt(
+                &prebuilt_tflitec_path,
+                &tf_src_path,
+                &tensorflow_lib_output_path,
+            );
         } else {
             // Build from source
             check_and_set_envs();
-            let config = if os == "android" || os == "ios" || (os == "macos" && arch == "arm64") {
-                format!("{}_{}", os, arch)
-            } else {
-                os
-            };
             build_libedgetpu_with_docker(
                 edgetpu_src_path.to_str().unwrap(),
                 edgetpu_lib_output_path.as_path(),
+                &arch,
+                &os,
             );
             build_tensorflow_with_docker(
                 tf_src_path.as_path(),
-                &config,
                 tensorflow_lib_output_path.as_path(),
+                &arch,
+                &os,
             );
         }
 
