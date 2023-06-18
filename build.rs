@@ -364,14 +364,9 @@ fn build_libedgetpu_with_docker(
 ) {
     let tf_target = tf_cpu(arch, os);
     let mut make = std::process::Command::new("make");
-    let mut docker_image_name = if arch == &TargetArch::aarch64 || arch == &TargetArch::arm {
-        "debian:stretch"
-    }else{
-        "ubuntu:18.04"
-    };
     make.arg("docker-build");
-    make.env("DOCKER_CPUS",  Into::<&str>::into(tf_target));
-    make.env("DOCKER_IMAGE", docker_image_name);
+    make.env("DOCKER_CPUS", Into::<&str>::into(tf_target));
+    make.env("DOCKER_IMAGE", "ubuntu:18.04");
     make.env("DOCKER_TARGETS", "libedgetpu");
 
     make.current_dir(edgetpu_src_path);
@@ -420,22 +415,34 @@ fn prepare_for_docsrs() {
     }
 }
 
-fn generate_bindings(tf_src_path: PathBuf, edgetpu_src_path: PathBuf) {
+fn generate_bindings(tf_src_path: PathBuf, edgetpu_src_path: PathBuf, target_arch: &TargetArch) {
     let tf_headers_dir = tf_src_path.join("tensorflow/lite/c");
     let mut builder =
         bindgen::Builder::default().header(tf_headers_dir.join("c_api.h").to_str().unwrap());
 
-    println!("cargo:rerun-if-changed={}", tf_headers_dir.to_str().unwrap());
+    println!(
+        "cargo:rerun-if-changed={}",
+        tf_headers_dir.to_str().unwrap()
+    );
     if cfg!(feature = "xnnpack") {
         let xnn_headers_dir = tf_src_path.join("tensorflow/lite/delegates/xnnpack");
+        println!(
+            "cargo:rerun-if-changed={}",
+            xnn_headers_dir.to_str().unwrap()
+        );
         builder = builder.header(xnn_headers_dir.join("xnnpack_delegate.h").to_str().unwrap());
     }
     if cfg!(feature = "edgetpu") {
         let edgetpu_headers_dir = edgetpu_src_path.join("tflite/public");
+        println!(
+            "cargo:rerun-if-changed={}",
+            edgetpu_headers_dir.to_str().unwrap()
+        );
         builder = builder.header(edgetpu_headers_dir.join("edgetpu_c.h").to_str().unwrap());
     }
 
     let bindings = builder
+        .size_t_is_usize(target_arch != &TargetArch::aarch64)
         .clang_arg(format!("-I{}", tf_src_path.to_str().unwrap()))
         .clang_arg(format!("-I{}", edgetpu_src_path.to_str().unwrap()))
         // Tell cargo to invalidate the built crate whenever any of the
@@ -604,6 +611,6 @@ fn main() {
         }
 
         // Generate bindings using headers
-        generate_bindings(tf_src_path, edgetpu_src_path);
+        generate_bindings(tf_src_path, edgetpu_src_path, &arch);
     }
 }
