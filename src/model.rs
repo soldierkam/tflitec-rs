@@ -8,7 +8,7 @@
 //! # Ok::<(), tflitec::Error>(())
 //! ```
 use crate::bindings::{
-    TfLiteModel, TfLiteModelCreate, TfLiteModelCreateFromFile, TfLiteModelDelete,
+    TfLiteModel, TfLiteModelCreate, TfLiteModelCreateFromFile, TfLiteModelDelete, size_t
 };
 use crate::{Error, ErrorKind, Result};
 use std::ffi::{c_void, CString};
@@ -71,7 +71,7 @@ impl Model<'_> {
     ///
     /// Returns error if TensorFlow Lite C fails to load model from the buffer.
     pub fn from_bytes(bytes: &[u8]) -> std::result::Result<Model, Error> {
-        let model_ptr = unsafe { TfLiteModelCreate(bytes.as_ptr() as *const c_void, bytes.len()) };
+        let model_ptr = unsafe { TfLiteModelCreate(bytes.as_ptr() as *const c_void, bytes.len() as size_t) };
         if model_ptr.is_null() {
             Err(Error::new(ErrorKind::FailedToLoadModel))
         } else {

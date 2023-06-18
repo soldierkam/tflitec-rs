@@ -551,6 +551,7 @@ fn download_file(url: &str, path: &Path) {
 }
 
 fn main() {
+    env_logger::init();
     {
         let env_vars = [
             BAZEL_COPTS_ENV_VAR,
