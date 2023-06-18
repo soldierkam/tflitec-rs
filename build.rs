@@ -328,7 +328,7 @@ fn build_tensorflow_with_docker(
     }
 }
 
-#[derive(Debug, PartialEq, EnumString)]
+#[derive(Debug, PartialEq, EnumString, IntoStaticStr)]
 enum TensorflowCPU {
     #[strum(serialize = "k8")]
     LINUX_K8,
@@ -344,15 +344,15 @@ enum TensorflowCPU {
     WINDOWS_64,
 }
 
-fn tf_cpu(arch: TargetArch, os: TargetOs) -> TensorflowCPU {
+fn tf_cpu(arch: &TargetArch, os: &TargetOs) -> TensorflowCPU {
     match os {
         TargetOs::Linux => match arch {
             TargetArch::x86_64 => TensorflowCPU::LINUX_K8,
             TargetArch::arm => TensorflowCPU::LINUX_ARM7,
             TargetArch::aarch64 => TensorflowCPU::LINUX_AARCH64,
-            _ => panic!(format!("Unsupported arch {:?} for os {:?}", arch, os)),
+            _ => panic!("Unsupported arch {:?} for os {:?}", arch, os),
         },
-        _ => panic!(format!("Unsupported arch {:?} for os {:?}", arch, os)),
+        _ => panic!("Unsupported arch {:?} for os {:?}", arch, os),
     }
 }
 
@@ -362,13 +362,16 @@ fn build_libedgetpu_with_docker(
     arch: &TargetArch,
     os: &TargetOs,
 ) {
-    //$ DOCKER_CPUS="k8" DOCKER_IMAGE="ubuntu:18.04" DOCKER_TARGETS=libedgetpu make docker-build
-    //$ DOCKER_CPUS="armv7a aarch64" DOCKER_IMAGE="debian:stretch" DOCKER_TARGETS=libedgetpu make docker-build
-
+    let tf_target = tf_cpu(arch, os);
     let mut make = std::process::Command::new("make");
+    let mut docker_image_name = if arch == &TargetArch::aarch64 || arch == &TargetArch::arm {
+        "debian:stretch"
+    }else{
+        "ubuntu:18.04"
+    };
     make.arg("docker-build");
-    make.env("DOCKER_CPUS", "k8");
-    make.env("DOCKER_IMAGE", "ubuntu:18.04");
+    make.env("DOCKER_CPUS",  Into::<&str>::into(tf_target));
+    make.env("DOCKER_IMAGE", docker_image_name);
     make.env("DOCKER_TARGETS", "libedgetpu");
 
     make.current_dir(edgetpu_src_path);
@@ -418,28 +421,18 @@ fn prepare_for_docsrs() {
 }
 
 fn generate_bindings(tf_src_path: PathBuf, edgetpu_src_path: PathBuf) {
-    let mut builder = bindgen::Builder::default().header(
-        tf_src_path
-            .join("tensorflow/lite/c/c_api.h")
-            .to_str()
-            .unwrap(),
-    );
+    let tf_headers_dir = tf_src_path.join("tensorflow/lite/c");
+    let mut builder =
+        bindgen::Builder::default().header(tf_headers_dir.join("c_api.h").to_str().unwrap());
+
+    println!("cargo:rerun-if-changed={}", tf_headers_dir.to_str().unwrap());
     if cfg!(feature = "xnnpack") {
-        builder = builder.header(
-            tf_src_path
-                .join("tensorflow/lite/delegates/xnnpack/xnnpack_delegate.h")
-                .to_str()
-                .unwrap(),
-        );
+        let xnn_headers_dir = tf_src_path.join("tensorflow/lite/delegates/xnnpack");
+        builder = builder.header(xnn_headers_dir.join("xnnpack_delegate.h").to_str().unwrap());
     }
     if cfg!(feature = "edgetpu") {
-        // https://github.com/google-coral/libedgetpu.git
-        builder = builder.header(
-            edgetpu_src_path
-                .join("tflite/public/edgetpu_c.h")
-                .to_str()
-                .unwrap(),
-        );
+        let edgetpu_headers_dir = edgetpu_src_path.join("tflite/public");
+        builder = builder.header(edgetpu_headers_dir.join("edgetpu_c.h").to_str().unwrap());
     }
 
     let bindings = builder
