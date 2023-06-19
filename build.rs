@@ -237,13 +237,35 @@ fn lib_output_path(name: &str, ios_name: &str) -> PathBuf {
     }
 }
 
+#[derive(Debug, PartialEq, EnumString, IntoStaticStr)]
+enum TensorflowTarget {
+    #[strum(serialize = "linux")]
+    LINUX_K8,
+    #[strum(serialize = "elinux_armhf")]
+    LINUX_ARM7,
+    #[strum(serialize = "elinux_aarch64")]
+    LINUX_AARCH64,
+}
+
+fn tensorflow_target(arch: &TargetArch, os: &TargetOs) -> TensorflowTarget {
+    match os {
+        TargetOs::Linux => match arch {
+            TargetArch::x86_64 => TensorflowTarget::LINUX_K8,
+            TargetArch::arm => TensorflowTarget::LINUX_ARM7,
+            TargetArch::aarch64 => TensorflowTarget::LINUX_AARCH64,
+            _ => panic!("Unsupported arch {:?} for os {:?}", arch, os),
+        },
+        _ => panic!("Unsupported arch {:?} for os {:?}", arch, os),
+    }
+}
+
 fn build_tensorflow_with_docker(
     tf_src_path: &Path,
     lib_output_path: &Path,
     arch: &TargetArch,
     os: &TargetOs,
 ) {
-    let target_os = target_os();
+    let tf_target = tensorflow_target(arch, os);
     let ext = dll_extension();
     let lib_prefix = dll_prefix();
 
@@ -271,10 +293,12 @@ fn build_tensorflow_with_docker(
         }
     }
 
-    if target_os == TargetOs::iOS {
+    if os == &TargetOs::iOS {
         bazel_cmd.push_str(" --apple_bitcode=embedded --copt=-fembed-bitcode");
     }
-    bazel_cmd.push_str(" --config=linux ");
+    bazel_cmd.push_str(" --config=");
+    bazel_cmd.push_str(tf_target.into());
+    bazel_cmd.push_str(" ");
     bazel_cmd.push_str(bazel_target);
     bazel_cmd.push_str(" && cp bazel-bin/tensorflow/lite/c/libtensorflowlite_c.so /tensorflow");
     let mut docker = std::process::Command::new("docker");
@@ -305,9 +329,9 @@ fn build_tensorflow_with_docker(
             bazel_output_path_buf.display()
         )
     }
-    if target_os != TargetOs::iOS {
+    if os != &TargetOs::iOS {
         copy_or_overwrite(&bazel_output_path_buf, lib_output_path);
-        if target_os == TargetOs::Windows {
+        if os == &TargetOs::Windows {
             let mut bazel_output_winlib_path_buf = bazel_output_path_buf;
             bazel_output_winlib_path_buf.set_extension("dll.if.lib");
             let winlib_output_path_buf = out_dir().join("tensorflowlite_c.lib");
@@ -327,9 +351,8 @@ fn build_tensorflow_with_docker(
         unzip.status().expect("Cannot execute unzip");
     }
 }
-
 #[derive(Debug, PartialEq, EnumString, IntoStaticStr)]
-enum TensorflowCPU {
+enum EdgeTpuTarget {
     #[strum(serialize = "k8")]
     LINUX_K8,
     #[strum(serialize = "armv7a")]
@@ -344,12 +367,12 @@ enum TensorflowCPU {
     WINDOWS_64,
 }
 
-fn tf_cpu(arch: &TargetArch, os: &TargetOs) -> TensorflowCPU {
+fn eget_tpu_target(arch: &TargetArch, os: &TargetOs) -> EdgeTpuTarget {
     match os {
         TargetOs::Linux => match arch {
-            TargetArch::x86_64 => TensorflowCPU::LINUX_K8,
-            TargetArch::arm => TensorflowCPU::LINUX_ARM7,
-            TargetArch::aarch64 => TensorflowCPU::LINUX_AARCH64,
+            TargetArch::x86_64 => EdgeTpuTarget::LINUX_K8,
+            TargetArch::arm => EdgeTpuTarget::LINUX_ARM7,
+            TargetArch::aarch64 => EdgeTpuTarget::LINUX_AARCH64,
             _ => panic!("Unsupported arch {:?} for os {:?}", arch, os),
         },
         _ => panic!("Unsupported arch {:?} for os {:?}", arch, os),
@@ -362,10 +385,11 @@ fn build_libedgetpu_with_docker(
     arch: &TargetArch,
     os: &TargetOs,
 ) {
-    let tf_target = tf_cpu(arch, os);
+    let edge_tpu_target = eget_tpu_target(arch, os);
+    let cpu = Into::<&str>::into(edge_tpu_target);
     let mut make = std::process::Command::new("make");
     make.arg("docker-build");
-    make.env("DOCKER_CPUS", Into::<&str>::into(tf_target));
+    make.env("DOCKER_CPUS", cpu);
     make.env("DOCKER_IMAGE", "ubuntu:18.04");
     make.env("DOCKER_TARGETS", "libedgetpu");
 
@@ -378,7 +402,7 @@ fn build_libedgetpu_with_docker(
     let make_output_path_buf = PathBuf::from(edgetpu_src_path)
         .join("out")
         .join("direct")
-        .join("k8")
+        .join(cpu)
         .join("libedgetpu.so.1.0");
     if !make_output_path_buf.exists() {
         panic!(
