@@ -8,6 +8,7 @@ use crate::tensor;
 use crate::tensor::Tensor;
 use crate::{Error, ErrorKind, Result};
 use std::fmt::{Debug, Formatter};
+use std::ptr;
 
 #[cfg(not(target_arch = "aarch64"))]
 pub type size_t = usize;
